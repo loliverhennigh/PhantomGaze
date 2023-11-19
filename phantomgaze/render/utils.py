@@ -1,8 +1,11 @@
 # Helpful functions
+# TODO: Find better place for these functions
 
 import cupy as cp
 import numba
 from numba import cuda
+
+from phantomgaze.utils.math import normalize, dot, cross
 
 @cuda.jit(device=True)
 def _safe_index_array(
@@ -132,8 +135,6 @@ def sample_array(
         dy,
         dz)
 
-
-
 @cuda.jit(device=True)
 def sample_array_derivative(
         array,
@@ -159,26 +160,74 @@ def sample_array_derivative(
     j = int((position[1] - origin[1]) / spacing[1])
     k = int((position[2] - origin[2]) / spacing[2])
 
-    # If the indices are out of bounds set the derivative to be normal of the array
+    # Compute dx derivatives and account for edges
     if i <= 0:
-        return (-1, 0, 0)
-    elif i >= array.shape[0]-1:
-        return (1, 0, 0)
-    elif j <= 0:
-        return (0, -1, 0)
-    elif j >= array.shape[1]-1:
-        return (0, 1, 0)
-    elif k <= 0:
-        return (0, 0, -1)
-    elif k >= array.shape[2]-1:
-        return (0, 0, 1)
+        array_dx = (array[1, j, k] - array[0, j, k]) / spacing[0]
+    elif i >= array.shape[0] - 1:
+        array_dx = (array[i + 1, j, k] - array[i - 1, j, k]) / (2 * spacing[0])
+    else:
+        array_dx = (array[i, j, k] - array[i - 1, j, k]) / spacing[0]
 
-    # Compute the derivative
-    array_dx = (array[i + 1, j, k] - array[i - 1, j, k]) / (2 * spacing[0])
-    array_dy = (array[i, j + 1, k] - array[i, j - 1, k]) / (2 * spacing[1])
-    array_dz = (array[i, j, k + 1] - array[i, j, k - 1]) / (2 * spacing[2])
+    # Compute dy derivatives and account for edges
+    if j <= 0:
+        array_dy = (array[i, 1, k] - array[i, 0, k]) / spacing[1]
+    elif j >= array.shape[1] - 1:
+        array_dy = (array[i, j + 1, k] - array[i, j - 1, k]) / (2 * spacing[1])
+    else:
+        array_dy = (array[i, j, k] - array[i, j - 1, k]) / spacing[1]
+
+    # Compute dz derivatives and account for edges
+    if k <= 0:
+        array_dz = (array[i, j, 1] - array[i, j, 0]) / spacing[2]
+    elif k >= array.shape[2] - 1:
+        array_dz = (array[i, j, k + 1] - array[i, j, k - 1]) / (2 * spacing[2])
+    else:
+        array_dz = (array[i, j, k] - array[i, j, k - 1]) / spacing[2]
 
     # Return the derivative
     return (array_dx, array_dy, array_dz)
 
 
+
+@cuda.jit(device=True)
+def ray_intersect_box(
+        box_origin,
+        box_upper,
+        ray_origin,
+        ray_direction):
+    """Compute the intersection of a ray with a box.
+
+    Parameters
+    ----------
+    box_origin : tuple
+        The origin of the box
+    box_upper : tuple
+        The upper bounds of the box.
+    ray_origin : tuple
+        The origin of the ray.
+    ray_direction : tuple
+        The direction of the ray.
+    """
+
+    # Get tmix and tmax
+    tmin_x = (box_origin[0] - ray_origin[0]) / ray_direction[0]
+    tmax_x = (box_upper[0] - ray_origin[0]) / ray_direction[0]
+    tmin_y = (box_origin[1] - ray_origin[1]) / ray_direction[1]
+    tmax_y = (box_upper[1] - ray_origin[1]) / ray_direction[1]
+    tmin_z = (box_origin[2] - ray_origin[2]) / ray_direction[2]
+    tmax_z = (box_upper[2] - ray_origin[2]) / ray_direction[2]
+
+    # Get tmin and tmax
+    tmmin_x = min(tmin_x, tmax_x)
+    tmmax_x = max(tmin_x, tmax_x)
+    tmmin_y = min(tmin_y, tmax_y)
+    tmmax_y = max(tmin_y, tmax_y)
+    tmmin_z = min(tmin_z, tmax_z)
+    tmmax_z = max(tmin_z, tmax_z)
+
+    # Get t0 and t1
+    t0 = max(0.0, max(tmmin_x, max(tmmin_y, tmmin_z)))
+    t1 = min(tmmax_x, min(tmmax_y, tmmax_z))
+
+    # Return the intersection
+    return t0, t1

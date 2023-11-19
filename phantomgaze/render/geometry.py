@@ -1,114 +1,243 @@
-# Helper functions for geometry
+# functions for rendering geometry
 
 import cupy as cp
 import numba
 from numba import cuda
 
-from phantomgaze.render.math import normalize, dot, cross
+from phantomgaze import ScreenBuffer
+from phantomgaze import SolidColor
+from phantomgaze.objects import Geometry
+from phantomgaze.utils.math import normalize, dot
+from phantomgaze.render.camera import calculate_ray_direction
 
+_geometry_render_kernels = {}
 
-@cuda.jit(device=True)
-def ray_intersect_box(
-        box_origin,
-        box_upper,
-        ray_origin,
-        ray_direction):
-    """Compute the intersection of a ray with a box.
+def kernel_constructor_render_geometry(sdf, sdf_derivative, opaque=True):
+    """
+    Constructs a kernel the renders a signed distance function.
+    TODO: probably make decorator
 
     Parameters
     ----------
-    box_origin : tuple
-        The origin of the box
-    box_upper : tuple
-        The upper bounds of the box.
-    ray_origin : tuple
-        The origin of the ray.
-    ray_direction : tuple
-        The direction of the ray.
-    """
-
-    # Get tmix and tmax
-    tmin_x = (box_origin[0] - ray_origin[0]) / ray_direction[0]
-    tmax_x = (box_upper[0] - ray_origin[0]) / ray_direction[0]
-    tmin_y = (box_origin[1] - ray_origin[1]) / ray_direction[1]
-    tmax_y = (box_upper[1] - ray_origin[1]) / ray_direction[1]
-    tmin_z = (box_origin[2] - ray_origin[2]) / ray_direction[2]
-    tmax_z = (box_upper[2] - ray_origin[2]) / ray_direction[2]
-
-    # Get tmin and tmax
-    tmmin_x = min(tmin_x, tmax_x)
-    tmmax_x = max(tmin_x, tmax_x)
-    tmmin_y = min(tmin_y, tmax_y)
-    tmmax_y = max(tmin_y, tmax_y)
-    tmmin_z = min(tmin_z, tmax_z)
-    tmmax_z = max(tmin_z, tmax_z)
-
-    # Get t0 and t1
-    t0 = max(0.0, max(tmmin_x, max(tmmin_y, tmmin_z)))
-    t1 = min(tmmax_x, min(tmmax_y, tmmax_z))
-
-    # Return the intersection
-    return t0, t1
-
-
-@cuda.jit(device=True)
-def intersect_ray_with_line(ray_origin, ray_direction, line_start, line_end):
-    """
-    Check if the ray intersects with the line segment and return the distance
-    if it does.
-
-    Parameters
-    ----------
-    ray_origin : tuple
-        The origin point of the ray.
-    ray_direction : tuple
-        The normalized direction vector of the ray.
-    line_start : tuple
-        The start point of the line segment.
-    line_end : tuple
-        The end point of the line segment.
+    sdf : function
+        The signed distance function to render. Must be a numba.jit(device=True) function.
+    sdf_derivative : function
+        The signed distance function derivative. Must be a numba.jit(device=True) function.
+    opaque : bool, optional
+        Whether the geometry is opaque or not, by default True
 
     Returns
     -------
-    tuple
-        (bool, float) indicating if there is an intersection and the distance.
+    function
+        The kernel that renders the signed distance function.
+        Outputs: (img, depth)
     """
-    # Calculate vectors
-    v1 = (
-        ray_origin[0] - line_start[0],
-        ray_origin[1] - line_start[1],
-        ray_origin[2] - line_start[2]
+
+    # Check if the kernel has already been constructed
+    if (sdf, sdf_derivative, opaque) in _geometry_render_kernels:
+        return _geometry_render_kernels[(sdf, sdf_derivative, opaque)]
+
+    # Define the kernel
+    @cuda.jit
+    def render_kernel(
+            distance_threshold,
+            camera_position,
+            camera_focal,
+            camera_up,
+            max_depth,
+            color_map_array,
+            opaque_pixel_buffer,
+            depth_buffer,
+            normal_buffer,
+            transparency_pixel_buffer,
+            revealage_buffer,
+            ):
+        """
+        Renders a signed distance function.
+
+        Parameters
+        ----------
+        distance_threshold : float, optional
+            The distance to check for intersection
+        camera_position : tuple
+            The position of the camera.
+        camera_focal : tuple
+            The focal point of the camera.
+        camera_up : tuple
+            The up vector of the camera.
+        max_depth : float
+            The maximum depth to render.
+        color_map_array : cp.array
+            The array of colors for the colormap. [r, g, b, a]
+        opaque_pixel_buffer : ndarray
+            The opaque pixel buffer.
+        depth_buffer : ndarray
+            The depth buffer.
+        normal_buffer : ndarray
+            The normal buffer.
+        transparency_pixel_buffer : ndarray
+            The transparency pixel buffer.
+        revealage_buffer : ndarray
+            The revealage buffer.
+        """
+
+        # Get the x and y indices
+        x, y = cuda.grid(2)
+    
+        # Make sure the indices are in bounds
+        if x >= opaque_pixel_buffer.shape[1] or y >= opaque_pixel_buffer.shape[0]:
+            return
+    
+        # Get ray direction
+        ray_direction = calculate_ray_direction(
+                x, y, opaque_pixel_buffer.shape,
+                camera_position, camera_focal, camera_up)
+    
+        # Get the starting point of the ray
+        ray_pos = (
+            camera_position[0],
+            camera_position[1],
+            camera_position[2]
+        )
+
+        # Distance traveled by the ray
+        distance_traveled = 0
+
+        # Ray march
+        while distance_traveled < max_depth:
+            # Get the distance to the object
+            distance = abs(sdf(ray_pos))
+
+            # Update the distance traveled
+            distance_traveled += distance
+
+            # Check if distance is greater than current depth
+            if distance_traveled > depth_buffer[y, x]:
+                return
+
+            # Update the ray position
+            ray_pos = (
+                ray_pos[0] + ray_direction[0] * distance,
+                ray_pos[1] + ray_direction[1] * distance,
+                ray_pos[2] + ray_direction[2] * distance
+            )
+
+            # Check if the ray is close enough to the object
+            if abs(distance) < distance_threshold:
+                # Get intensity TODO: Maybe change this
+                gradient = sdf_derivative(ray_pos)
+                gradient = normalize(gradient)
+                intensity = dot(gradient, ray_direction)
+                intensity = abs(intensity)
+
+                # Get the color and opacity
+                color = (
+                    color_map_array[0, 0],
+                    color_map_array[0, 1],
+                    color_map_array[0, 2]
+                )
+                opacity = color_map_array[0, 3]
+
+                # If solid, set the pixel buffer (meta programming)
+                if opaque:
+                    # Set the opaque pixel buffer
+                    opaque_pixel_buffer[y, x, 0] = color[0] * intensity
+                    opaque_pixel_buffer[y, x, 1] = color[1] * intensity
+                    opaque_pixel_buffer[y, x, 2] = color[2] * intensity
+
+                    # Set the depth buffer
+                    depth_buffer[y, x] = distance_traveled
+
+                    # Set the normal buffer
+                    normal_buffer[y, x, 0] = gradient[0]
+                    normal_buffer[y, x, 1] = gradient[1]
+                    normal_buffer[y, x, 2] = gradient[2]
+
+                    # Exit the loop
+                    return
+
+                # If transparent, set the pixel buffer (meta programming)
+                else:
+                    # Calculate weight following Weighted Blended OIT
+                    normalized_distance = distance_traveled / max_depth
+                    weight = 1.0 / (normalized_distance**2.0 + 1.0)
+    
+                    # Accumulate the color
+                    transparency_pixel_buffer[y, x, 0] += color[0] * weight * opacity * intensity
+                    transparency_pixel_buffer[y, x, 1] += color[1] * weight * opacity * intensity
+                    transparency_pixel_buffer[y, x, 2] += color[2] * weight * opacity * intensity
+    
+                    # Set the revealage buffer
+                    revealage_buffer[y, x] *= (1.0 - opacity * weight)
+    
+                    # Take small steps to pass through the object
+                    while distance < distance_threshold:
+    
+                        # Take a small step
+                        ray_pos = (
+                            ray_pos[0] + ray_direction[0] * distance_threshold,
+                            ray_pos[1] + ray_direction[1] * distance_threshold,
+                            ray_pos[2] + ray_direction[2] * distance_threshold
+                        )
+    
+                        # Update the distance traveled
+                        distance_traveled += distance_threshold
+    
+                        # Get the new signed distance
+                        distance = abs(sdf(ray_pos))
+            
+    # Add the kernel to the dictionary
+    _geometry_render_kernels[(sdf, sdf_derivative, opaque)] = render_kernel
+
+    return render_kernel
+
+def geometry(
+        geometry,
+        camera,
+        color=SolidColor(color=(1.0, 1.0, 1.0), opacity=1.0),
+        screen_buffer=None):
+    """
+    Renders a geometry object
+
+    Parameters
+    ----------
+    geometry : Geometry
+        The geometry object to render
+    camera : Camera
+        The camera object to render with
+    color : SolidColor, optional
+        The color of the geometry
+    screen_buffer : ScreenBuffer, optional
+        The screen buffer to render to. If None, a new screen buffer will be created.
+    """
+
+    # Get the screen buffer
+    if screen_buffer is None:
+        screen_buffer = ScreenBuffer.from_camera(camera)
+
+    # Set the block size
+    threads_per_block = (16, 16)
+    blocks = (
+        (screen_buffer.width + threads_per_block[0] - 1) // threads_per_block[0],
+        (screen_buffer.height + threads_per_block[1] - 1) // threads_per_block[1]
     )
-    v2 = (
-        line_end[0] - line_start[0],
-        line_end[1] - line_start[1],
-        line_end[2] - line_start[2]
+
+    # Construct the kernel
+    render_kernel = kernel_constructor_render_geometry(geometry.sdf, geometry.derivative, color.opaque)
+
+    # Run the kernel
+    render_kernel[blocks, threads_per_block](
+        geometry.distance_threshold,
+        camera.position,
+        camera.focal_point,
+        camera.view_up,
+        camera.max_depth,
+        color.color_map_array,
+        screen_buffer.opaque_pixel_buffer,
+        screen_buffer.depth_buffer,
+        screen_buffer.normal_buffer,
+        screen_buffer.transparent_pixel_buffer,
+        screen_buffer.revealage_buffer,
     )
-    v3 = (
-        -ray_direction[1],
-        ray_direction[0],
-        0.0
-    )
 
-    # Calculate the cross product
-    v2_cross_v3 = cross(v2, v3)
-
-    # Compute normal
-    v2_cross_v3_norm = (v2_cross_v3[0] ** 2 + v2_cross_v3[1] ** 2 + v2_cross_v3[2] ** 2) ** 0.5
-
-    # Check if the line and the ray are parallel
-    if v2_cross_v3_norm < 1e-5:
-        return False, cp.inf
-
-    # Calculate the t and u parameters for intersection
-    t = dot(v1, v3) / dot(v2, v3)
-    u = cp.dot(v1, v2_cross_v3) / cp.linalg.norm(v2_cross_v3)
-
-    # Check if the intersection is within the line segment and in the ray's direction
-    if 0 <= t <= 1 and u >= 0:
-        # Calculate the intersection distance
-        intersection_point = line_start + t * v2
-        distance = cp.linalg.norm(ray_origin - intersection_point)
-        return True, distance
-
-    return False, cp.inf
+    return screen_buffer

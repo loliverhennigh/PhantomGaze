@@ -4,9 +4,7 @@ import math
 import numba
 from numba import cuda
 
-from phantomgaze import Volume
-from phantomgaze.render.math import normalize, dot, cross
-
+from phantomgaze.utils.math import normalize, dot, cross
 
 @cuda.jit(device=True)
 def calculate_ray_direction(

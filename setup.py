@@ -13,5 +13,4 @@ setup(
         "Intended Audience :: Science/Research",
         "Programming Language :: Python :: 3.8",
     ],
-
 )

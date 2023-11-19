@@ -22,11 +22,4 @@ class Slice:
     """
 
     def __init__(self, array, spacing, origin, normal):
-        self.array = array
-        self.spacing = spacing
-        self.origin = origin
-        self.normal = normal
-        self.shape = array.shape
-
-        # Assert normal is in x, y, or z direction
-        assert np.sum(np.abs(normal)) == 1, "Normal must be in x, y, or z direction"
+        raise NotImplementedError("Slice class is not implemented yet")

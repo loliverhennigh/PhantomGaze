@@ -4,13 +4,12 @@ import cupy as cp
 import numba
 from numba import cuda
 
-from phantomgaze import Volume
-from phantomgaze.colormap import Colormap
+from phantomgaze import ScreenBuffer
+from phantomgaze import Colormap, SolidColor
+from phantomgaze.utils.math import normalize, dot, cross
 from phantomgaze.render.camera import calculate_ray_direction
-from phantomgaze.render.utils import sample_array, sample_array_derivative
-from phantomgaze.render.math import normalize, dot, cross
-from phantomgaze.render.color import scalar_to_color, blend_colors
-from phantomgaze.render.geometry import ray_intersect_box
+from phantomgaze.render.utils import sample_array, sample_array_derivative, ray_intersect_box
+from phantomgaze.render.color import scalar_to_color
 
 
 @cuda.jit
@@ -21,12 +20,15 @@ def volume_kernel(
         camera_position,
         camera_focal,
         camera_up,
+        max_depth,
         color_map_array,
         vmin,
         vmax,
-        opacity,
-        img,
-        depth):
+        nan_color,
+        nan_opacity,
+        depth_buffer,
+        transparent_pixel_buffer,
+        revealage_buffer):
     """Kernel for rendering a volume.
 
     Parameters
@@ -43,30 +45,36 @@ def volume_kernel(
         The focal point of the camera.
     camera_up : tuple
         The up vector of the camera.
+    max_depth : float
+        The maximum depth to render to.
     color_map_array : ndarray
-        The color map array.
+        The color map data.
     vmin : float
-        The minimum value of the scalar range.
+        The minimum value of the volume.
     vmax : float
-        The maximum value of the scalar range.
-    opacity : float
-        The opacity of the volume.
-    img : ndarray
-        The image to render to.
-    depth : ndarray
-        The depth buffer to render to.
+        The maximum value of the volume.
+    nan_color : tuple
+        The color to use for NaN values.
+    nan_opacity : float
+        The opacity to use for NaN values.
+    depth_buffer : ndarray
+        The buffer to store depth values in.
+    transparent_pixel_buffer : ndarray
+        The buffer to store transparent pixels in.
+    revealage_buffer : ndarray
+        The buffer to store revealage values in.
     """
 
     # Get the x and y indices
     x, y = cuda.grid(2)
 
     # Make sure the indices are in bounds
-    if x >= img.shape[1] or y >= img.shape[0]:
+    if x >= transparent_pixel_buffer.shape[1] or y >= transparent_pixel_buffer.shape[0]:
         return
 
     # Get ray direction
     ray_direction = calculate_ray_direction(
-            x, y, img.shape,
+            x, y, transparent_pixel_buffer.shape,
             camera_position, camera_focal, camera_up)
 
     # Get volume upper bound
@@ -94,17 +102,11 @@ def volume_kernel(
     # Get the step size
     step_size = min(spacing[0], min(spacing[1], spacing[2]))
 
-    # Get depth
-    current_depth = depth[y, x]
-    if current_depth == cp.nan:
-        current_depth = cp.inf
-
     # Start the ray marching
     distance = t0
-    accum_color = (0.0, 0.0, 0.0, 0.0)
     for step in range(int((t1 - t0) / step_size)):
         # Break out of the kernel if the distance is greater than the depth
-        if (distance > current_depth) or (accum_color[3] > 0.99):
+        if distance > depth_buffer[y, x]:
             break
 
         # Get the value at the current position
@@ -113,13 +115,23 @@ def volume_kernel(
         # Get the color
         color = scalar_to_color(value, color_map_array, vmin, vmax)
 
-        # Accumulate the color using the opacity
-        accum_color = (
-            accum_color[0] + color[0] * opacity * (1.0 - accum_color[3]),
-            accum_color[1] + color[1] * opacity * (1.0 - accum_color[3]),
-            accum_color[2] + color[2] * opacity * (1.0 - accum_color[3]),
-            accum_color[3] + opacity * (1.0 - accum_color[3])
+        # Calculate weight following Weighted Blended OIT
+        normalized_distance = distance / max_depth
+        weight = 1.0 / (normalized_distance**2.0 + 1.0)
+
+        # Accumulate the color
+        transparent_pixel_buffer[y, x, 0] += (
+            color[0] * weight * color[3] * step_size
         )
+        transparent_pixel_buffer[y, x, 1] += (
+            color[1] * weight * color[3] * step_size
+        )
+        transparent_pixel_buffer[y, x, 2] += (
+            color[2] * weight * color[3] * step_size
+        )
+
+        # Accumulate the revealage
+        revealage_buffer[y, x] *= (1.0 - color[3] * weight * step_size)
 
         # Increment the distance
         ray_pos = (
@@ -129,57 +141,38 @@ def volume_kernel(
         )
         distance += step_size
 
-    # Blend the color
-    current_color = (
-        img[y, x, 0],
-        img[y, x, 1],
-        img[y, x, 2],
-        img[y, x, 3]
-    )
-    color = blend_colors(accum_color, current_color)
 
-    # Set the color
-    img[y, x, 0] = color[0]
-    img[y, x, 1] = color[1]
-    img[y, x, 2] = color[2]
-    img[y, x, 3] = color[3]
-
-
-def volume(volume, camera, colormap=None, opacity=0.001, img=None, depth=None):
+def volume(volume, camera, colormap=None, screen_buffer=None):
     """Render a volume
 
     Parameters
     ----------
-    volume : Volume
+    volume : phantom.object.Volume
         The volume to render.
     camera : Camera
         The camera to render with.
     colormap : ColorMap
-        The colormap to use.
-    opacity : float
-        The opacity of the volume.
-    img : ndarray
-        The image to render to.
-    depth : ndarray
-        The depth buffer to render to.
+        The colormap to use for the volume. If None, the colormap will be
+        jet with the minimum value of the volume as the minimum value and the
+        maximum value of the volume as the maximum value.
+    screen_buffer : ndarray
+        The buffer to render to.
     """
 
-    # Create the image and depth buffer if necessary
-    if img is None:
-        img = cp.zeros((camera.height, camera.width, 4), dtype=cp.float32)
-    if depth is None:
-        depth = cp.zeros((camera.height, camera.width), dtype=cp.float32) + cp.nan # nan is the closest thing to infinity
+    # Get the screen buffer
+    if screen_buffer is None:
+        screen_buffer = ScreenBuffer.from_camera(camera)
 
     # Set up thread blocks
     threads_per_block = (16, 16)
     blocks = (
-        (img.shape[1] + threads_per_block[0] - 1) // threads_per_block[0],
-        (img.shape[0] + threads_per_block[1] - 1) // threads_per_block[1]
+        (screen_buffer.width + threads_per_block[0] - 1) // threads_per_block[0],
+        (screen_buffer.height + threads_per_block[1] - 1) // threads_per_block[1]
     )
 
     # Get colormap if necessary
     if colormap is None:
-        colormap = Colormap('jet', float(color_array.min()), float(color_array.max()))
+        colormap = Colormap('jet', float(volume.array.min()), float(volume.array.max()))
 
     # Run kernel
     volume_kernel[blocks, threads_per_block](
@@ -189,12 +182,15 @@ def volume(volume, camera, colormap=None, opacity=0.001, img=None, depth=None):
         camera.position,
         camera.focal_point,
         camera.view_up,
+        camera.max_depth,
         colormap.color_map_array,
         colormap.vmin,
         colormap.vmax,
-        opacity,
-        img,
-        depth
+        colormap.nan_color,
+        colormap.nan_opacity,
+        screen_buffer.depth_buffer,
+        screen_buffer.transparent_pixel_buffer,
+        screen_buffer.revealage_buffer
     )
 
-    return img, depth
+    return screen_buffer

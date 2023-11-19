@@ -1,3 +1,6 @@
-from phantomgaze.volume import Volume
 from phantomgaze.camera import Camera
-from phantomgaze.colormap import Colormap
+from phantomgaze.coloring import Colormap, SolidColor
+from phantomgaze.background import Background, SolidBackground
+from phantomgaze.buffers import ScreenBuffer
+import phantomgaze.objects
+import phantomgaze.render

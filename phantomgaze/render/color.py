@@ -33,24 +33,3 @@ def scalar_to_color(value, color_map_array, vmin, vmax):
         color_map_array[index, 3],
     )
     return color
-
-@cuda.jit
-def blend_colors(cur_color, pre_color):
-    """Blend two colors.
-
-    Parameters
-    ----------
-    cur_color : tuple
-        The first color. Forth value is alpha.
-    pre_color : tuple
-        The second color. Forth value is alpha.
-    """
-
-    # Blend the colors
-    color = (
-        cur_color[0] * cur_color[3] + pre_color[0] * pre_color[3] * (1 - cur_color[3]),
-        cur_color[1] * cur_color[3] + pre_color[1] * pre_color[3] * (1 - cur_color[3]),
-        cur_color[2] * cur_color[3] + pre_color[2] * pre_color[3] * (1 - cur_color[3]),
-        cur_color[3] + pre_color[3] * (1 - cur_color[3]),
-    )
-    return color

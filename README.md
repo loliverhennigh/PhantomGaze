@@ -59,5 +59,5 @@ plt.show()
 
 This produces the following image:
 
-![Contour](https://github.com/loliverhennigh/PhantomGaze/assets/readme_example.png)
+![Contour](https://github.com/loliverhennigh/PhantomGaze/blob/main/assets/readme_example.png)
 

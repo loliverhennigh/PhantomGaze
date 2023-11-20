@@ -154,39 +154,22 @@ def sample_array_derivative(
     position : tuple
         The position to sample.
     """
-     
-    # Get the i, j, and k indices of the volume
-    i = int((position[0] - origin[0]) / spacing[0])
-    j = int((position[1] - origin[1]) / spacing[1])
-    k = int((position[2] - origin[2]) / spacing[2])
 
-    # Compute dx derivatives and account for edges
-    if i <= 0:
-        array_dx = (array[1, j, k] - array[0, j, k]) / spacing[0]
-    elif i >= array.shape[0] - 1:
-        array_dx = (array[i + 1, j, k] - array[i - 1, j, k]) / (2 * spacing[0])
-    else:
-        array_dx = (array[i, j, k] - array[i - 1, j, k]) / spacing[0]
+    # Move the position by a small amount
+    value_0_1_1 = sample_array(array, spacing, origin, (position[0] - spacing[0]/2.0, position[1], position[2]))
+    value_1_0_1 = sample_array(array, spacing, origin, (position[0], position[1] - spacing[1]/2.0, position[2]))
+    value_1_1_0 = sample_array(array, spacing, origin, (position[0], position[1], position[2] - spacing[2]/2.0))
+    value_2_1_1 = sample_array(array, spacing, origin, (position[0] + spacing[0]/2.0, position[1], position[2]))
+    value_1_2_1 = sample_array(array, spacing, origin, (position[0], position[1] + spacing[1]/2.0, position[2]))
+    value_1_1_2 = sample_array(array, spacing, origin, (position[0], position[1], position[2] + spacing[2]/2.0))
 
-    # Compute dy derivatives and account for edges
-    if j <= 0:
-        array_dy = (array[i, 1, k] - array[i, 0, k]) / spacing[1]
-    elif j >= array.shape[1] - 1:
-        array_dy = (array[i, j + 1, k] - array[i, j - 1, k]) / (2 * spacing[1])
-    else:
-        array_dy = (array[i, j, k] - array[i, j - 1, k]) / spacing[1]
-
-    # Compute dz derivatives and account for edges
-    if k <= 0:
-        array_dz = (array[i, j, 1] - array[i, j, 0]) / spacing[2]
-    elif k >= array.shape[2] - 1:
-        array_dz = (array[i, j, k + 1] - array[i, j, k - 1]) / (2 * spacing[2])
-    else:
-        array_dz = (array[i, j, k] - array[i, j, k - 1]) / spacing[2]
+    # Compute the derivative
+    array_dx = (value_2_1_1 - value_0_1_1) / spacing[0]
+    array_dy = (value_1_2_1 - value_1_0_1) / spacing[1]
+    array_dz = (value_1_1_2 - value_1_1_0) / spacing[2]
 
     # Return the derivative
     return (array_dx, array_dy, array_dz)
-
 
 
 @cuda.jit(device=True)

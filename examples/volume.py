@@ -2,7 +2,6 @@
 
 import cupy as cp
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 
 import phantomgaze as pg
 
@@ -27,16 +26,6 @@ if __name__ == "__main__":
     # Create screen buffer
     screen_buffer = pg.ScreenBuffer.from_camera(camera)
    
-    for _ in tqdm(range(100)):
-        # Render the axes
-        screen_buffer = pg.render.axes(size=0.1, center=(-1.5, -1.5, 1.0), camera=camera, screen_buffer=screen_buffer)
-
-        # Render wireframe of the volume
-        screen_buffer = pg.render.wireframe(lower_bound=(-1.0, -1.0, -1.0), upper_bound=(1.0, 1.0, 1.0), thickness=2 / 256, camera=camera, screen_buffer=screen_buffer)
-
-        # Render the volume plot
-        screen_buffer = pg.render.volume(sin_volume, camera, colormap=colormap, screen_buffer=screen_buffer)
-
     # Render the axes
     screen_buffer = pg.render.axes(size=0.1, center=(-1.5, -1.5, 1.0), camera=camera)
 

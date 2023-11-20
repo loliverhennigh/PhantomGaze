@@ -61,3 +61,11 @@ This produces the following image:
 
 ![Contour](https://github.com/loliverhennigh/PhantomGaze/blob/main/assets/readme_example.png)
 
+## Gallery
+
+The following images were generated using the examples in the `examples` directory.
+
+![Axes](https://github.com/loliverhennigh/PhantomGaze/blob/main/assets/axes.png)
+![Geometry](https://github.com/loliverhennigh/PhantomGaze/blob/main/assets/geometry.png)
+![Volume](https://github.com/loliverhennigh/PhantomGaze/blob/main/assets/volume.png)
+
